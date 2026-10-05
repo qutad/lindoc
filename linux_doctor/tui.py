@@ -10,6 +10,19 @@ from pathlib import Path
 from .diagnostics import diagnose_sharing, scan
 from .report import STATUS, format_changes, safe_text, save_report
 
+SECTION_COLORS = {
+    'system': 'cyan', 'graphics': 'magenta', 'portals': 'blue',
+    'audio': 'cyan', 'integration': 'magenta', 'power': 'blue',
+    'sharing': 'cyan',
+}
+
+
+def check_style(check):
+    if check.get('severity') == 'critical' or check['status'] == 'critical':
+        return 'critical', '!!', 'Critical warning'
+    marker, label = STATUS.get(check['status'], STATUS['unknown'])
+    return check['status'], marker, label
+
 
 def cell_width(char):
     if unicodedata.combining(char):
@@ -61,6 +74,7 @@ class DoctorTUI:
         self.panel = None
         self.offset = 0
         self.message = ''
+        self.message_style = 'muted'
         self.future = None
         self.pool = ThreadPoolExecutor(max_workers=1)
         self.colors = {}
@@ -88,6 +102,7 @@ class DoctorTUI:
     def start_scan(self):
         if self.future is not None:
             self.message = 'A scan is already running.'
+            self.message_style = 'warning'
             return
         self.message = ''
         self.future = self.pool.submit(scan, since=self.log_since)
@@ -102,9 +117,11 @@ class DoctorTUI:
                 collected['changes'] = format_changes(self.data, collected)
                 self.previous, self.data = self.data, collected
                 self.message = 'Scan complete. No system settings changed.'
+                self.message_style = 'healthy'
                 self.offset = 0
             except Exception as error:
                 self.message = f'Scan failed: {error}. Press r to retry.'
+                self.message_style = 'critical'
             self.future = None
 
     def checks(self):
@@ -113,88 +130,171 @@ class DoctorTUI:
     def mark_reproduction(self):
         self.log_since = datetime.now(timezone.utc).isoformat(timespec='seconds')
         self.message = 'Time marked. Reproduce the problem, then press r.'
+        self.message_style = 'cyan'
+
+    def color(self, role, extra=0):
+        return self.colors.get(role, 0) | extra
+
+    def write_spans(self, y, x, spans, extra=0):
+        """Draw independently colored fragments using terminal cell positions."""
+        for value, attr in spans:
+            value = safe_text(value).replace('\n', ' ').expandtabs(4)
+            self.write(y, x, value, attr | extra)
+            x += sum(cell_width(char) for char in value)
+
+    def init_colors(self):
+        if not curses.has_colors():
+            return
+        try:
+            curses.start_color()
+        except curses.error:
+            return
+        background = curses.COLOR_BLACK
+        try:
+            curses.use_default_colors()
+            background = -1
+        except curses.error:
+            pass
+        palette = (('healthy', curses.COLOR_GREEN), ('warning', curses.COLOR_YELLOW),
+                   ('critical', curses.COLOR_RED), ('unknown', curses.COLOR_CYAN),
+                   ('cyan', curses.COLOR_CYAN), ('magenta', curses.COLOR_MAGENTA),
+                   ('blue', curses.COLOR_BLUE))
+        for pair, (role, foreground) in enumerate(palette, 1):
+            try:
+                curses.init_pair(pair, foreground, background)
+                self.colors[role] = curses.color_pair(pair)
+            except curses.error:
+                continue
+
+    def write_help(self, y, text):
+        spans = []
+        for index, part in enumerate(text.split('  ')):
+            if index:
+                spans.append(('  ', 0))
+            key, separator, label = part.partition(':')
+            spans.append((key, self.color('cyan', curses.A_BOLD)))
+            spans.append((separator + label, 0))
+        self.write_spans(y, 2, spans)
 
     def draw(self):
         self.screen.erase()
         height, width = self.screen.getmaxyx()
-        self.write(0, 2, 'LINUX DOCTOR', curses.A_BOLD)
+        self.write(0, 2, 'LINUX DOCTOR', self.color('cyan', curses.A_BOLD))
         if height < 16 or width < 54:
-            self.write(2, 1, 'Resize terminal to at least 54 x 16.')
+            self.write(2, 1, 'Resize terminal to at least 54 x 16.', self.color('warning'))
             self.write(4, 1, 'q: quit')
             self.screen.refresh()
             return
         if self.future is not None:
             spinner = '|/-\\'[int(time.monotonic() * 8) % 4]
-            self.write(1, 2, f'{spinner} Scanning read-only checks...')
+            self.write(1, 2, f'{spinner} Scanning read-only checks...', self.color('cyan'))
         else:
             self.write(1, 2, 'Local diagnostics / read-only / no root needed', curses.A_DIM)
         if self.log_since:
             self.write(2, 2, f'Log window starts: {self.log_since}', curses.A_DIM)
         if self.data:
-            self.write(3, 2, f'{self.data["system"]} | {self.data["desktop"]} | {self.data["session"]}')
+            self.write_spans(3, 2, [('OS: ', self.color('cyan', curses.A_BOLD)),
+                                    (self.data['system'], 0), (' | Desktop: ', self.color('magenta', curses.A_BOLD)),
+                                    (self.data['desktop'], 0), (' | Session: ', self.color('blue', curses.A_BOLD)),
+                                    (self.data['session'], 0)])
             context = self.data.get('environment', {}).get('context', '')
             self.write(4, 2, context or f'Kernel {self.data["kernel"]}')
             if self.panel == 'wizard':
                 self.draw_wizard(height, width)
             elif self.panel == 'environment':
-                self.write(6, 2, 'ENVIRONMENT AND PROBE AVAILABILITY', curses.A_BOLD)
-                self.draw_scroll(self.environment_lines(width - 5), height)
+                self.write(6, 2, 'ENVIRONMENT AND PROBE AVAILABILITY', self.color('cyan', curses.A_BOLD))
+                self.draw_scroll(self.environment_lines(width - 5, styled=True), height)
             elif self.panel == 'changes':
-                self.write(6, 2, 'CHANGES SINCE PREVIOUS SCAN', curses.A_BOLD)
+                self.write(6, 2, 'CHANGES SINCE PREVIOUS SCAN', self.color('cyan', curses.A_BOLD))
                 self.draw_scroll(wrap_lines(self.data.get('changes', ['Run another scan to compare.']), width - 5), height)
             elif self.detail:
                 check = self.checks()[self.selected]
-                marker, label = STATUS[check['status']]
-                self.write(6, 2, f'[{marker}] {check["name"]} - {label}', curses.A_BOLD)
-                self.draw_scroll(detail_lines(check, width - 5), height)
+                role, marker, label = check_style(check)
+                self.write_spans(6, 2, [(f'[{marker}] ', self.color(role, curses.A_BOLD)),
+                                        (check['name'], self.color(SECTION_COLORS.get(check['id'], 'cyan'), curses.A_BOLD)),
+                                        (f' - {label}', self.color(role, curses.A_BOLD))])
+                self.draw_scroll(self.styled_detail_lines(check, width - 5), height)
             else:
                 self.draw_overview(height, width)
         else:
             self.write(5, 2, 'Reading devices, services, and logs...' if self.future else 'No results. Press r to retry.')
-        self.write(height - 3, 2, self.message, curses.A_DIM)
+        self.write(height - 3, 2, self.message, self.color(self.message_style))
         if self.panel == 'wizard':
             help_text = 'Type app name  Enter: next  Esc: cancel' if self.wizard_phase == 'name' else 'j/k: select  Enter: next  Esc: cancel  q: quit'
         elif self.detail or self.panel in ('changes', 'environment'):
             help_text = 'j/k: scroll  PgUp/Dn  Esc: back  s: save  q: quit'
         else:
             help_text = 'j/k: select  Enter: open  r: scan  s: save  q: quit'
-        self.write(height - 2, 2, help_text)
+        self.write_help(height - 2, help_text)
         self.screen.refresh()
 
     def draw_overview(self, height, width):
         checks = self.checks()
-        counts = {status: sum(c['status'] == status for c in checks) for status in STATUS}
-        self.write(6, 2, f'{counts["healthy"]} passed / {counts["warning"]} attention / {counts["unknown"]} unverified', curses.A_BOLD)
-        self.write(7, 2, 't: diagnose sharing  m: mark  c: changes  i: tools')
+        counts = {status: sum(check_style(c)[0] == status for c in checks)
+                  for status in ('healthy', 'warning', 'critical', 'unknown')}
+        self.write_spans(6, 2, [(f'{counts["healthy"]} OK', self.color('healthy', curses.A_BOLD)),
+                                (' / ', 0), (f'{counts["warning"]} warning', self.color('warning', curses.A_BOLD)),
+                                (' / ', 0), (f'{counts["critical"]} critical', self.color('critical', curses.A_BOLD)),
+                                (' / ', 0), (f'{counts["unknown"]} unverified', self.color('unknown', curses.A_BOLD))])
+        self.write_help(7, 't: diagnose sharing  m: mark  c: changes  i: tools')
         row_count = max(1, height - 13)
         first = max(0, self.selected - row_count + 1)
         for row, index in enumerate(range(first, min(len(checks), first + row_count)), 9):
             check = checks[index]
-            marker, _ = STATUS[check['status']]
+            role, marker, _ = check_style(check)
             prefix = '>' if index == self.selected else ' '
-            text = f'{prefix} [{marker:2}] {check["name"]}'
+            selected = curses.A_REVERSE | curses.A_BOLD if index == self.selected else 0
+            self.write(row, 2, ' ' * (width - 4), selected)
+            spans = [(prefix + ' ', self.color('cyan')), (f'[{marker:2}] ', self.color(role, curses.A_BOLD)),
+                     (check['name'], curses.A_BOLD)]
             if width >= 85:
-                text = f'{text:<28} {check["summary"]}'
-            attr = curses.A_REVERSE if index == self.selected else self.colors.get(check['status'], 0)
-            self.write(row, 2, text.ljust(width - 4), attr)
-        self.write(height - 4, 2, checks[self.selected]['summary'])
+                cells = sum(cell_width(c) for text, _ in spans for c in safe_text(text))
+                spans.append((' ' * max(1, 29 - cells) + check['summary'], self.color(role)))
+            self.write_spans(row, 2, spans, selected)
+        self.write(height - 4, 2, checks[self.selected]['summary'], self.color(check_style(checks[self.selected])[0]))
+
+    def styled_detail_lines(self, check, width):
+        role = check_style(check)[0]
+        paragraphs = [(check['summary'], self.color(role, curses.A_BOLD)), ('', 0)]
+        if check.get('finding'):
+            paragraphs.extend([('FINDING', self.color('cyan', curses.A_BOLD)),
+                               (check['finding'], self.color(role)),
+                               (f'Confidence: {check.get("confidence", "not established")}', curses.A_DIM), ('', 0)])
+        paragraphs.append((check['explanation'], 0))
+        if check['steps']:
+            paragraphs.extend([('', 0), ('NEXT STEPS', self.color('cyan', curses.A_BOLD))])
+            paragraphs.extend((f'{i}. {step}', 0) for i, step in enumerate(check['steps'], 1))
+        paragraphs.extend([('', 0), ('EVIDENCE', self.color('cyan', curses.A_BOLD)),
+                           (check['evidence'] or 'No evidence collected.', 0)])
+        return [(line, attr) for paragraph, attr in paragraphs for line in wrap_lines([paragraph], width)]
 
     def draw_scroll(self, lines, height):
         page = max(1, height - 12)
         self.offset = min(self.offset, max(0, len(lines) - page))
         for y, line in enumerate(lines[self.offset:self.offset + page], 8):
-            self.write(y, 2, line)
+            if isinstance(line, tuple):
+                self.write(y, 2, *line)
+            elif ':' in line:
+                label, value = line.split(':', 1)
+                self.write_spans(y, 2, [(label + ':', self.color('cyan', curses.A_BOLD)), (value, 0)])
+            else:
+                self.write(y, 2, line)
         self.write(height - 4, 2, f'Lines {self.offset + 1}-{min(len(lines), self.offset + page)} of {len(lines)}', curses.A_DIM)
 
-    def environment_lines(self, width):
+    def environment_lines(self, width, styled=False):
         environment = self.data.get('environment', {})
-        paragraphs = [environment.get('context', 'Context unavailable'), *environment.get('warnings', []), '', 'PROBES']
+        paragraphs = [(environment.get('context', 'Context unavailable'), 0)]
+        paragraphs.extend((warning, self.color('warning')) for warning in environment.get('warnings', []))
+        paragraphs.extend([('', 0), ('PROBES', self.color('cyan', curses.A_BOLD))])
         for name, probe in self.data.get('probes', {}).items():
             outcome = probe.get('outcome', 'ok' if probe.get('ok') else 'unavailable')
-            paragraphs.extend([f'{name}: {outcome}', probe.get('output', '') if outcome != 'ok' else '', ''])
+            role = 'healthy' if outcome == 'ok' else 'warning' if outcome in ('error', 'timeout') else 'unknown'
+            paragraphs.extend([(f'{name}: {outcome}', self.color(role)),
+                               (probe.get('output', '') if outcome != 'ok' else '', 0), ('', 0)])
         if not self.data.get('probes'):
-            paragraphs.append('No probe metadata available.')
-        return wrap_lines(paragraphs, width)
+            paragraphs.append(('No probe metadata available.', self.color('unknown')))
+        lines = [(line, attr) for paragraph, attr in paragraphs for line in wrap_lines([paragraph], width)]
+        return lines if styled else [line for line, _ in lines]
 
     def wizard_options(self):
         if self.wizard_phase == 'app':
@@ -206,7 +306,7 @@ class DoctorTUI:
         return []
 
     def draw_wizard(self, height, width):
-        self.write(6, 2, 'TROUBLESHOOT SCREEN SHARING', curses.A_BOLD)
+        self.write(6, 2, 'TROUBLESHOOT SCREEN SHARING', self.color('cyan', curses.A_BOLD))
         titles = {'app': 'Which application is affected?', 'name': 'Enter the application name:', 'package': 'How do you run this application?', 'outcome': 'Try sharing now. What happened?'}
         self.write(7, 2, titles[self.wizard_phase])
         if self.wizard_phase == 'name':
@@ -229,6 +329,7 @@ class DoctorTUI:
     def begin_wizard(self):
         if self.future is not None:
             self.message = 'Wait for the current scan before troubleshooting.'
+            self.message_style = 'warning'
             return
         self.wizard_previous_since = self.log_since
         self.panel = 'wizard'
@@ -249,6 +350,7 @@ class DoctorTUI:
             self.panel = None
             self.log_since = self.wizard_previous_since
             self.message = 'Troubleshooting cancelled.'
+            self.message_style = 'cyan'
             return True
         if self.wizard_phase == 'name':
             if key in (10, 13, curses.KEY_ENTER) and self.app_name.strip():
@@ -303,6 +405,7 @@ class DoctorTUI:
         elif key == ord('m'):
             if self.future is not None:
                 self.message = 'Wait for the current scan before marking time.'
+                self.message_style = 'warning'
             else:
                 self.mark_reproduction()
         elif key == ord('i'):
@@ -316,8 +419,10 @@ class DoctorTUI:
             try:
                 save_report(self.data, Path.cwd() / filename)
                 self.message = f'Saved ./{filename} (redacted; review before sharing)'
+                self.message_style = 'healthy'
             except OSError as error:
                 self.message = f'Cannot save report: {error}'
+                self.message_style = 'critical'
         elif key in (27, ord('b'), curses.KEY_LEFT):
             self.panel = None
             self.detail = False
@@ -347,15 +452,7 @@ class DoctorTUI:
             curses.curs_set(0)
         except curses.error:
             pass
-        if curses.has_colors():
-            curses.start_color()
-            try:
-                curses.use_default_colors()
-                for pair, (status, color) in enumerate((('healthy', curses.COLOR_GREEN), ('warning', curses.COLOR_YELLOW), ('unknown', curses.COLOR_CYAN)), 1):
-                    curses.init_pair(pair, color, -1)
-                    self.colors[status] = curses.color_pair(pair)
-            except curses.error:
-                pass
+        self.init_colors()
         self.screen.keypad(True)
         self.screen.timeout(100)
         self.start_scan()

@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from linux_doctor.report import format_report, safe_text, save_report
-from linux_doctor.tui import DoctorTUI, cell_width, detail_lines
+from linux_doctor.tui import DoctorTUI, cell_width, check_style, detail_lines
 
 CHECK = {'id': 'sharing', 'name': 'Screen sharing', 'status': 'unknown', 'summary': 'Test needed', 'explanation': 'Services alone do not prove screen sharing works.', 'evidence': '\x1b[2JAn untrusted log\x07', 'steps': ['Start a screen share.']}
 DATA = {'scannedAt': '2026-10-03T20:00:00Z', 'system': 'Linux', 'kernel': 'test', 'desktop': 'GNOME', 'session': 'Wayland', 'checks': [], 'sharing': CHECK}
@@ -67,6 +67,50 @@ class TUITests(unittest.TestCase):
         self.ui.draw()
         self.assertTrue(self.screen.refresh.called)
         self.assertFalse(self.ui.handle_key(ord('q')))
+
+    def test_selection_keeps_status_color_and_plain_section_name(self):
+        self.ui.colors = {'healthy': 256, 'cyan': 512}
+        self.ui.data = {**DATA, 'checks': [{**CHECK, 'id': 'system', 'name': 'Operating system', 'status': 'healthy'}]}
+        self.ui.draw()
+        calls = [call.args for call in self.screen.addnstr.call_args_list if call.args[0] == 9]
+        marker = next(args for args in calls if args[2] == '[OK] ')
+        name = next(args for args in calls if args[2] == 'Operating system')
+        self.assertTrue(marker[4] & 256)
+        self.assertFalse(name[4] & 512)
+        self.assertTrue(name[4] & curses.A_BOLD)
+        self.assertTrue(marker[4] & curses.A_REVERSE)
+        self.assertTrue(name[4] & curses.A_REVERSE)
+
+    def test_critical_warning_is_explicit_in_details_and_export(self):
+        check = {**CHECK, 'status': 'warning', 'severity': 'critical'}
+        self.ui.colors = {'critical': 256}
+        self.ui.data = {**DATA, 'sharing': check}
+        self.ui.detail = True
+        self.ui.draw()
+        self.assertEqual(check_style(check), ('critical', '!!', 'Critical warning'))
+        summary = next(call.args for call in self.screen.addnstr.call_args_list if call.args[0] == 8)
+        self.assertTrue(summary[4] & 256)
+        self.assertIn('[!!] Screen sharing - Critical warning', format_report(self.ui.data))
+        self.assertEqual(check_style({**CHECK, 'status': 'warning'})[0], 'warning')
+        self.assertEqual(check_style(CHECK)[0], 'unknown')
+
+    def test_color_initialization_falls_back_when_default_background_is_unsupported(self):
+        with patch('linux_doctor.tui.curses.has_colors', return_value=True), \
+                patch('linux_doctor.tui.curses.start_color'), \
+                patch('linux_doctor.tui.curses.use_default_colors', side_effect=curses.error), \
+                patch('linux_doctor.tui.curses.init_pair') as init_pair, \
+                patch('linux_doctor.tui.curses.color_pair', side_effect=lambda pair: pair << 8):
+            self.ui.init_colors()
+        self.assertEqual(len(self.ui.colors), 7)
+        self.assertTrue(all(call.args[2] == curses.COLOR_BLACK for call in init_pair.call_args_list))
+
+    def test_detail_styles_preserve_wrapping_and_inert_evidence(self):
+        self.ui.colors = {'cyan': 256, 'unknown': 512}
+        lines = self.ui.styled_detail_lines(CHECK, 20)
+        self.assertEqual([line for line, _ in lines], detail_lines(CHECK, 20))
+        evidence_index = next(i for i, (line, _) in enumerate(lines) if line == 'EVIDENCE')
+        self.assertTrue(lines[evidence_index][1] & 256)
+        self.assertTrue(all(attr == 0 for _, attr in lines[evidence_index + 1:]))
 
     def test_scan_error_preserves_previous_data(self):
         self.ui.future = Mock()

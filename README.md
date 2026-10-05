@@ -12,6 +12,8 @@ python3 -m linux_doctor
 
 This opens Linux Doctor in your terminal. Select a system check to read its explanation, evidence, and suggested next steps. Use a terminal at least 54 columns wide and 16 rows tall.
 
+The TUI uses green for passed checks and successful actions, yellow for warnings, and red for critical warnings such as confirmed failed portal or screen-sharing services. Unverified results use cyan. Main menu section names are bold in the terminal's default text color. Detail section names, system field labels, detail headings, and keyboard shortcuts are highlighted for easier navigation. Status markers (`OK`, `!`, `!!`, `?`) also identify each result in terminals without color.
+
 | Key | Action |
 | --- | --- |
 | Up / Down or `j` / `k` | Select a check; scroll its details |

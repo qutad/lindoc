@@ -110,6 +110,8 @@ def format_report(data):
             lines.append(f'- {key}: {availability}; {outcome}')
     for check in _all_checks(data):
         marker, label = STATUS.get(check['status'], ('?', check['status']))
+        if check.get('severity') == 'critical' or check['status'] == 'critical':
+            marker, label = '!!', 'Critical warning'
         lines.extend(['', f'[{marker}] {check["name"]} - {label}', check['summary'], check['explanation']])
         if check.get('finding'):
             lines.append(f'Finding: {_display(check["finding"])}')
