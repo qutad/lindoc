@@ -137,6 +137,8 @@ def diagnose_sharing(data, answers):
         evidence.append('Environment limitations:\n' + '\n'.join(warnings))
     result = item('sharing', 'Screen sharing', status, summary, explanation, '\n\n'.join(evidence), steps)
     result.update(finding=finding, confidence=confidence)
+    if failed:
+        result['severity'] = 'critical'
     return result
 
 
@@ -192,6 +194,8 @@ def scan(since=None):
         item('audio', 'Audio & devices', 'healthy' if audio['ok'] else 'unknown', 'WirePlumber is reachable' if audio['ok'] else 'Audio state not confirmed', 'The device list comes from WirePlumber. A successful connection does not confirm that your speakers or microphone produce sound.', audio['output'], ['Inspect the listed sinks (speakers) and sources (microphones).', 'Use desktop sound settings to test the selected output and microphone.']),
         item('integration', 'App integration', 'unknown', 'Per-app rendering needs verification', 'Wayland session detection alone cannot tell whether an individual application uses XWayland, or whether scaling makes it blurry.', f'Session: {session}\nDesktop: {desktop}\nRunning Flatpak applications:\n{results["apps"]["output"]}', ['Check the affected app’s display settings and supported Wayland options.', 'Compare rendering at 100% scale using your desktop settings.']),
     ]
+    if portal_status == 'warning':
+        checks[2]['severity'] = 'critical'
     power = []
     for supply in glob.glob('/sys/class/power_supply/*'):
         if read(f'{supply}/type') == 'Battery':
